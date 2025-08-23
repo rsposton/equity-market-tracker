@@ -1,0 +1,19 @@
+# Wash-Sale Unlocks Template
+# --------------------------
+# This CSV file is a placeholder for tracking wash-sale cooldowns.
+# ChatGPT will generate filled versions of this file when you upload
+# your Positions CSV and Transactions CSV into the project.
+# 
+# Format requirements:
+# - Symbol: Stock ticker that was sold at a loss
+# - Loss_Sale_Date: Date the loss sale occurred
+# - Not_Ok_To_Buy_Until: Earliest date allowed to repurchase (sale date + 90 days, per your rules)
+# - First_Buy_After_Cooldown: The first actual buy after cooldown (if any)
+# - Days_Until_Rebuy: Number of days between sale and first valid repurchase
+# 
+# Notes:
+# - This file helps ensure compliance with wash-sale rules.
+# - Your strategy enforces a 90-day cooldown (stricter than IRS 31-day minimum).
+# - Excluded categories (pharma, tobacco) will not rotate back at all, so those may remain 'N/A'.
+# - Keep this file alongside the Schwab Trade File for context on each TLH cycle.
+Symbol,Loss_Sale_Date,Not_Ok_To_Buy_Until,First_Buy_After_Cooldown,Days_Until_Rebuy

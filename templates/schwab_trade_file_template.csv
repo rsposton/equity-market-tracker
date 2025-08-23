@@ -1,0 +1,19 @@
+# Schwab Trade File Template
+# --------------------------
+# This CSV file is a placeholder for Schwab-formatted trades.
+# ChatGPT will generate filled versions of this file when you upload
+# your Positions CSV and Transactions CSV into the project.
+# 
+# Format requirements:
+# - Action: BUY or SELL
+# - Symbol: Stock or ETF ticker
+# - Quantity: Number of shares (decimal allowed)
+# - Price: Typically 'MKT' for market order
+# - Account: Your Schwab account number (placeholder 1122-3344 by default)
+# 
+# Notes:
+# - Trades are kept Mariner-style (one-for-one pairing of stock sells with ETF buys,
+#   and ETF sells with stock buys).
+# - Do not aggregate ETF orders; each is listed separately for tax accounting clarity.
+# - This file can be uploaded directly into Schwab once populated with real orders.
+Action,Symbol,Quantity,Price,Account
