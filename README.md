@@ -70,3 +70,13 @@ This project folder contains everything needed to manage your **Direct Index + T
 - Keep all 4 template/guide files in this project so the workflow is always reproducible.
 - Add each new **positions** and **transactions** CSV into the project before a run.
 - After each run, you can archive the generated `schwab_trade_file.csv` and `wash_sale_unlocks.csv` for your records.
+
+---
+
+## ✅ Adding Validation Rules
+Validation rules for lot-level data live in `ingestor.py` inside the `Lot` Pydantic model.
+
+To add a new rule:
+1. Open `ingestor.py` and find the `Lot` class.
+2. Add a new field or `@validator` method to enforce the rule (for example, reject negative prices or enforce a minimum quantity).
+3. Update or add tests in `tests/test_ingestor.py` to cover the new rule.
