@@ -1,0 +1,29 @@
+[
+  {
+    "symbol": "AAPL",
+    "qty": 100.0,
+    "acquisition_date": "2026-01-09",
+    "cost_basis_per_share": 200.0,
+    "total_cost_basis": 20000.0,
+    "current_price": 185.0,
+    "unrealized_pl_pct": -0.075
+  },
+  {
+    "symbol": "JNJ",
+    "qty": 50.0,
+    "acquisition_date": "2026-01-09",
+    "cost_basis_per_share": 175.0,
+    "total_cost_basis": 8750.0,
+    "current_price": 160.0,
+    "unrealized_pl_pct": -0.0857
+  },
+  {
+    "symbol": "MSFT",
+    "qty": 10.0,
+    "acquisition_date": "2026-01-09",
+    "cost_basis_per_share": 350.0,
+    "total_cost_basis": 3500.0,
+    "current_price": 400.0,
+    "unrealized_pl_pct": 0.142
+  }
+]
