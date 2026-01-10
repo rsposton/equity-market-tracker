@@ -139,7 +139,7 @@ def parse_schwab_positions(path: str) -> List[dict]:
     payload = []
     for lot in lots:
         data = lot.dict()
-        data[\"acquisition_date\"] = lot.acquisition_date.isoformat()
+        data["acquisition_date"] = lot.acquisition_date.isoformat()
         payload.append(data)
     return payload
 
