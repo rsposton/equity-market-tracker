@@ -197,3 +197,31 @@ def export_schwab_trades(
     output_path = output_dir / f"schwab_trades_{date.today():%Y%m%d}.csv"
     df.to_csv(output_path, index=False)
     return output_path, preview_df, summary
+
+
+def export_genesis_orders(
+    orders: Iterable[dict],
+    output_dir: Path | str = Path("."),
+    filename: str = "schwab_genesis_orders.csv",
+    account_number: str = "",
+) -> tuple[Path, pd.DataFrame]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    for order in orders:
+        rows.append(
+            {
+                "Account Number": account_number,
+                "Symbol": order.get("symbol"),
+                "Action": order.get("action", "Buy"),
+                "Quantity": order.get("qty"),
+                "Order Type": "Market",
+                "Timing": "Day",
+            }
+        )
+
+    df = pd.DataFrame(rows, columns=SCHWAB_HEADERS)
+    output_path = output_dir / filename
+    df.to_csv(output_path, index=False)
+    return output_path, df
