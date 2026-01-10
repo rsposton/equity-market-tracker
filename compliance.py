@@ -10,6 +10,7 @@ from typing import Iterable, Optional
 
 DEFAULT_DB_PATH = Path("wash_sale.db")
 LOCKOUT_DAYS = 90
+COMPLIANCE_DUMMY = False
 
 
 @dataclass(frozen=True)
