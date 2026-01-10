@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, validator
 
 
 HEADER_REQUIRED_COLUMNS = {"Symbol", "Quantity"}
-DATE_FORMATS = ["%m/%d/%Y", "%Y-%m-%d"]
+DATE_FORMATS = ["%m/%d/%Y", "%Y-%m-%d", "%Y/%m/%d"]
 HEADER_ALIASES = {
     "Qty (Quantity)": "Quantity",
     "Qty": "Quantity",
@@ -49,7 +49,7 @@ class Lot(BaseModel):
 
 
 def _normalize_header_name(value: str) -> str:
-    cleaned = value.strip().strip('"')
+    cleaned = value.strip().strip('"').lstrip("\ufeff")
     return HEADER_ALIASES.get(cleaned, cleaned)
 
 
@@ -64,7 +64,9 @@ def _find_header_row(rows: Iterable[List[str]]) -> int:
 def _extract_as_of_date(lines: Iterable[str]) -> Optional[date]:
     for line in lines:
         match = re.search(
-            r"as of .*?(\d{2}/\d{2}/\d{4})", line, flags=re.IGNORECASE
+            r"as of .*?(\d{2}/\d{2}/\d{4}|\d{4}/\d{2}/\d{2})",
+            line,
+            flags=re.IGNORECASE,
         )
         if match:
             return _parse_date(match.group(1))

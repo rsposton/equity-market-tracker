@@ -69,6 +69,7 @@ def test_positions_with_preamble_and_alias_headers():
 
     assert len(lots) == 1
     assert lots[0]["symbol"] == "FNDX"
+    assert lots[0]["acquisition_date"] == "2026-01-10"
     assert lots[0]["qty"] == 1488.0
     assert lots[0]["current_price"] == 28.12
     assert lots[0]["total_cost_basis"] == 25897.69
