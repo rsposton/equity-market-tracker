@@ -10,6 +10,19 @@ from pydantic import BaseModel, Field, validator
 
 HEADER_REQUIRED_COLUMNS = {"Symbol", "Quantity"}
 DATE_FORMATS = ["%m/%d/%Y", "%Y-%m-%d"]
+HEADER_ALIASES = {
+    "Qty (Quantity)": "Quantity",
+    "Qty": "Quantity",
+    "Gain % (Gain/Loss %)": "Gain/Loss %",
+    "Gain/Loss %": "Gain/Loss %",
+    "Cost Basis": "Total Cost Basis",
+    "Total Cost Basis": "Total Cost Basis",
+    "Cost Basis Per Share": "Cost Basis Per Share",
+    "Price": "Price",
+    "Symbol": "Symbol",
+    "Date Acquired": "Date Acquired",
+    "Acquired": "Acquired",
+}
 
 
 class Lot(BaseModel):
@@ -35,9 +48,14 @@ class Lot(BaseModel):
         return symbol
 
 
+def _normalize_header_name(value: str) -> str:
+    cleaned = value.strip().strip('"')
+    return HEADER_ALIASES.get(cleaned, cleaned)
+
+
 def _find_header_row(rows: Iterable[List[str]]) -> int:
     for index, row in enumerate(rows):
-        normalized = [cell.strip().strip('"') for cell in row]
+        normalized = [_normalize_header_name(cell) for cell in row]
         if HEADER_REQUIRED_COLUMNS.issubset(set(normalized)):
             return index
     raise ValueError("CSV header row not found")
@@ -45,7 +63,9 @@ def _find_header_row(rows: Iterable[List[str]]) -> int:
 
 def _extract_as_of_date(lines: Iterable[str]) -> Optional[date]:
     for line in lines:
-        match = re.search(r"as of (\d{2}/\d{2}/\d{4})", line, flags=re.IGNORECASE)
+        match = re.search(
+            r"as of .*?(\d{2}/\d{2}/\d{4})", line, flags=re.IGNORECASE
+        )
         if match:
             return _parse_date(match.group(1))
     return None
@@ -63,10 +83,19 @@ def _parse_date(value: Optional[str]) -> date:
     raise ValueError(f"unsupported date format: {value}")
 
 
+def _strip_excel_format(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("="):
+        cleaned = cleaned.lstrip("=")
+    return cleaned.strip('"')
+
+
 def _parse_currency(value: Optional[str]) -> float:
     if value is None or str(value).strip() == "":
         raise ValueError("currency value is required")
-    cleaned = str(value)
+    cleaned = _strip_excel_format(str(value))
+    if cleaned.upper() in {"N/A", "--"}:
+        raise ValueError("currency value is required")
     cleaned = cleaned.replace("$", "").replace(",", "").strip()
     if cleaned.startswith("(") and cleaned.endswith(")"):
         cleaned = f"-{cleaned[1:-1]}"
@@ -76,10 +105,27 @@ def _parse_currency(value: Optional[str]) -> float:
 def _parse_percentage(value: Optional[str]) -> float:
     if value is None or str(value).strip() == "":
         raise ValueError("percentage value is required")
-    cleaned = str(value).strip().replace("%", "")
+    cleaned = _strip_excel_format(str(value)).replace("%", "").strip()
+    if cleaned.upper() in {"N/A", "--"}:
+        raise ValueError("percentage value is required")
     if cleaned.startswith("+"):
         cleaned = cleaned[1:]
     return round(float(cleaned) / 100, 4)
+
+
+def _parse_quantity(value: Optional[str]) -> Optional[float]:
+    if value is None or str(value).strip() == "":
+        return None
+    cleaned = _strip_excel_format(str(value))
+    if cleaned.upper() in {"N/A", "--"}:
+        return None
+    cleaned = cleaned.replace(",", "").strip()
+    if cleaned == "":
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 def _read_positions_dataframe(path: str) -> tuple[pd.DataFrame, Optional[date]]:
@@ -97,6 +143,7 @@ def _read_positions_dataframe(path: str) -> tuple[pd.DataFrame, Optional[date]]:
         dtype=str,
         keep_default_na=False,
     )
+    df = df.rename(columns={col: _normalize_header_name(col) for col in df.columns})
     return df, as_of_date
 
 
@@ -114,7 +161,9 @@ def parse_schwab_positions(path: str) -> List[dict]:
                 raise ValueError("acquisition date could not be determined")
             acquisition_date = as_of_date
 
-        qty = float(row.get("Quantity"))
+        qty = _parse_quantity(row.get("Quantity"))
+        if qty is None:
+            continue
         cost_basis_per_share = row.get("Cost Basis Per Share")
         total_cost_basis = row.get("Total Cost Basis")
 
