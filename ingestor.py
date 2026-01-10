@@ -137,7 +137,7 @@ def _read_positions_dataframe(path: str) -> tuple[pd.DataFrame, Optional[date]]:
     lines = content.splitlines()
     rows = list(csv.reader(lines))
     header_index = _find_header_row(rows)
-    as_of_date = _extract_as_of_date(lines[:header_index])
+    as_of_date = _extract_as_of_date(lines)
 
     df = pd.read_csv(
         io.StringIO(content),
