@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Iterable, Optional
 
 import json
+import logging
+
+from compliance import COMPLIANCE_DUMMY, check_safety
 
 
 DEFAULT_EXCLUSIONS_PATH = Path(__file__).with_name("exclusions.json")
@@ -156,6 +159,12 @@ def propose_trades(
     wash_sale_registry: Optional[dict] = None,
     exclusions_path: Path = DEFAULT_EXCLUSIONS_PATH,
 ) -> dict:
+    logger = logging.getLogger(__name__)
+    if COMPLIANCE_DUMMY:
+        logger.warning("Compliance check is using dummy implementation.")
+    else:
+        logger.info("Compliance check is using real implementation.")
+
     lots = payload.get("lots", [])
     replacement_prices = payload.get("replacement_prices", {})
     portfolio_value = payload.get("portfolio_value")
@@ -201,6 +210,8 @@ def propose_trades(
         if replacement_sector_blocked or replacement_ticker_blocked:
             continue
         if registry.is_blocked(replacement):
+            continue
+        if not check_safety(replacement, datetime.now(tz=timezone.utc).date()):
             continue
 
         replacement_price = _as_decimal(replacement_prices.get(replacement, "1"))
