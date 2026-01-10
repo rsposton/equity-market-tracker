@@ -1,9 +1,10 @@
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from ingestor import parse_schwab_positions
+from ingestor import WASH_SALE_INDEX, parse_schwab_positions, parse_schwab_transactions
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -74,3 +75,115 @@ def test_positions_with_preamble_and_alias_headers():
     assert lots[0]["current_price"] == 28.12
     assert lots[0]["total_cost_basis"] == 25897.69
     assert lots[0]["unrealized_pl_pct"] == 0.6157
+
+
+def test_dividend_reinvestment_loop(tmp_path: Path):
+    payload = {
+        "BrokerageTransactions": [
+            {
+                "Date": "03/03/2025",
+                "Action": "Qualified Dividend",
+                "Symbol": "FNDX",
+                "Quantity": "",
+                "Price": "",
+                "Amount": "5.00",
+                "ItemIssueId": "div-1",
+            },
+            {
+                "Date": "03/03/2025",
+                "Action": "Qual Div Reinvest",
+                "Symbol": "FNDX",
+                "Quantity": "0.5000",
+                "Price": "10.00",
+                "Amount": "5.00",
+                "ItemIssueId": "reinv-1",
+            },
+        ]
+    }
+    path = tmp_path / "transactions.json"
+    path.write_text(json.dumps(payload))
+
+    adjustments = parse_schwab_transactions(str(path))
+
+    assert adjustments[0]["cash_delta"] == Decimal("5.00")
+    assert adjustments[1]["cash_delta"] == Decimal("-5.00")
+    assert adjustments[1]["lot_delta"] == Decimal("0.5000")
+
+
+def test_reverse_split(tmp_path: Path):
+    payload = {
+        "BrokerageTransactions": [
+            {
+                "Date": "04/01/2025",
+                "Action": "Reverse Split",
+                "Symbol": "XYZ",
+                "Quantity": "-274",
+                "Price": "",
+                "Amount": "",
+                "ItemIssueId": "split-1",
+            },
+            {
+                "Date": "04/01/2025",
+                "Action": "Reverse Split",
+                "Symbol": "XYZ",
+                "Quantity": "27",
+                "Price": "",
+                "Amount": "",
+                "ItemIssueId": "split-2",
+            },
+        ]
+    }
+    path = tmp_path / "transactions.json"
+    path.write_text(json.dumps(payload))
+
+    adjustments = parse_schwab_transactions(str(path))
+
+    assert len(adjustments) == 1
+    assert adjustments[0]["cost_basis_multiplier"] == Decimal("10")
+    assert adjustments[0]["quantity_before"] == Decimal("274")
+    assert adjustments[0]["quantity_after"] == Decimal("27")
+
+
+def test_merger_liquidation(tmp_path: Path):
+    payload = {
+        "BrokerageTransactions": [
+            {
+                "Date": "05/15/2025",
+                "Action": "Cash Merger",
+                "Symbol": "ABC",
+                "Quantity": "10",
+                "Price": "",
+                "Amount": "123.45",
+                "ItemIssueId": "merge-1",
+            }
+        ]
+    }
+    path = tmp_path / "transactions.json"
+    path.write_text(json.dumps(payload))
+
+    adjustments = parse_schwab_transactions(str(path))
+
+    assert adjustments[0]["cash_delta"] == Decimal("123.45")
+    assert adjustments[0]["lot_delta"] == Decimal("-10")
+
+
+def test_wash_sale_indexing(tmp_path: Path):
+    payload = {
+        "BrokerageTransactions": [
+            {
+                "Date": "06/01/2025",
+                "Action": "Sell",
+                "Symbol": "AAPL",
+                "Quantity": "5",
+                "Price": "200.00",
+                "Amount": "1000.00",
+                "ItemIssueId": "sell-1",
+            }
+        ]
+    }
+    path = tmp_path / "transactions.json"
+    path.write_text(json.dumps(payload))
+
+    parse_schwab_transactions(str(path))
+
+    assert WASH_SALE_INDEX["AAPL"][0]["quantity"] == Decimal("5")
