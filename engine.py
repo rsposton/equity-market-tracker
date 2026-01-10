@@ -9,7 +9,7 @@ from typing import Iterable, Optional
 import json
 import logging
 
-from compliance import COMPLIANCE_DUMMY, check_safety
+from compliance import COMPLIANCE_DUMMY, WASH_SALE_WINDOW, check_safety
 
 
 DEFAULT_EXCLUSIONS_PATH = Path(__file__).with_name("exclusions.json")
@@ -251,7 +251,7 @@ def mock_wash_sale_registry(
     substantially_identical: Optional[dict[str, list[str]]] = None,
     as_of: Optional[datetime] = None,
 ) -> dict:
-    cutoff = (as_of or datetime.utcnow()) - timedelta(days=90)
+    cutoff = (as_of or datetime.utcnow()) - timedelta(days=WASH_SALE_WINDOW)
     cleaned_sales = {}
     for ticker, date_str in (recent_sales or {}).items():
         try:
