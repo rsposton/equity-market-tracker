@@ -61,3 +61,15 @@ def test_golden_file_regression():
     golden = json.loads(golden_path.read_text())
 
     assert lots == golden
+
+
+def test_positions_with_preamble_and_alias_headers():
+    positions_path = FIXTURES_DIR / "mock_positions_with_preamble.csv"
+    lots = parse_schwab_positions(str(positions_path))
+
+    assert len(lots) == 1
+    assert lots[0]["symbol"] == "FNDX"
+    assert lots[0]["qty"] == 1488.0
+    assert lots[0]["current_price"] == 28.12
+    assert lots[0]["total_cost_basis"] == 25897.69
+    assert lots[0]["unrealized_pl_pct"] == 0.6157
