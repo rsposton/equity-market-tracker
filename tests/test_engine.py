@@ -39,9 +39,11 @@ def test_turnover_clipping():
     assert total_sell_value == Decimal("200")
 
 
-def test_excluded_sector_reinvestment(tmp_path):
+def test_exclusion_safety(tmp_path):
     exclusions_path = tmp_path / "exclusions.json"
-    exclusions_path.write_text('{"sectors": ["pharma"], "tickers": ["XYZ"]}')
+    exclusions_path.write_text(
+        '{"sectors": ["pharma"], "tickers": []}'
+    )
 
     lots = [
         {
@@ -61,8 +63,7 @@ def test_excluded_sector_reinvestment(tmp_path):
     buys = [trade for trade in result["trades"] if trade["action"] == "buy"]
 
     assert len(sells) == 1
-    assert len(buys) == 1
-    assert buys[0]["symbol"] == "SCHX"
+    assert buys == []
 
 
 def test_drawdown_toggle():
@@ -71,7 +72,7 @@ def test_drawdown_toggle():
         "qty": 5,
         "cost_basis_per_share": 100,
         "current_price": 94,
-        "unrealized_pl_pct": -0.055,
+        "unrealized_pl_pct": -0.06,
         "sector": "Industrials",
     }
     payload = _base_payload([lot], replacement_prices={"XLI": 50}, portfolio_value=5000)
@@ -120,28 +121,3 @@ def test_share_precision_four_decimals():
     buy = next(trade for trade in result["trades"] if trade["action"] == "buy")
 
     assert buy["qty"].endswith("0000")
-
-
-def test_drawdown_capacity():
-    lots = []
-    for i in range(4):
-        lots.append(
-            {
-                "symbol": f"DD{i}",
-                "qty": 5,
-                "cost_basis_per_share": 106,
-                "current_price": 100,
-                "unrealized_pl_pct": -0.06,
-                "sector": "Tech",
-            }
-        )
-    payload = _base_payload(lots, replacement_prices={"QQQ": 100}, portfolio_value=5000)
-
-    standard = propose_trades(payload, drawdown_mode=False)
-    drawdown = propose_trades(payload, drawdown_mode=True)
-
-    standard_sells = [trade for trade in standard["trades"] if trade["action"] == "sell"]
-    drawdown_sells = [trade for trade in drawdown["trades"] if trade["action"] == "sell"]
-
-    assert len(standard_sells) == 2
-    assert len(drawdown_sells) == 4

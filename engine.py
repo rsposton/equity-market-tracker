@@ -1,168 +1,269 @@
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable, Optional
+
+import json
+import logging
+
+from compliance import COMPLIANCE_DUMMY, check_safety
 
 
-DEFAULT_REPLACEMENT = "SCHX"
-SECTOR_REPLACEMENTS = {
+DEFAULT_EXCLUSIONS_PATH = Path(__file__).with_name("exclusions.json")
+
+
+REPLACEMENT_MAPPING = {
     "tech": "QQQ",
-    "technology": "QQQ",
+    "mega-cap growth": "QQQ",
     "financials": "XLF",
-    "banks": "XLF",
     "energy": "XLE",
     "industrials": "XLI",
-    "industrial": "XLI",
-    "healthcare": "SCHX",
-    "pharma": "SCHX",
-    "biotech": "SCHX",
-    "tobacco": "SCHX",
-    "nicotine": "SCHX",
+    "broad": "SCHX",
+    "general": "SCHX",
+    "other": "SCHX",
+    "value": "FNDX",
 }
 
 
-def _normalize_sector(sector: str | None) -> str:
+@dataclass(frozen=True)
+class LossCandidate:
+    symbol: str
+    qty: Decimal
+    current_price: Decimal
+    loss_pct: Decimal
+    dollar_loss: Decimal
+    sector: str
+    replacement: str
+
+    @property
+    def sale_value(self) -> Decimal:
+        return self.qty * self.current_price
+
+
+@dataclass(frozen=True)
+class WashSaleRegistry:
+    recent_sales: dict[str, str]
+    substantially_identical: dict[str, list[str]]
+
+    def is_blocked(self, ticker: str) -> bool:
+        if ticker in self.recent_sales:
+            return True
+        for candidate in self.substantially_identical.get(ticker, []):
+            if candidate in self.recent_sales:
+                return True
+        return False
+
+
+def _as_decimal(value: float | str | Decimal) -> Decimal:
+    return Decimal(str(value))
+
+
+def _format_shares(value: Decimal) -> str:
+    return f"{value.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP):.4f}"
+
+
+def _load_exclusions(path: Path = DEFAULT_EXCLUSIONS_PATH) -> dict:
+    if not path.exists():
+        return {"sectors": [], "tickers": []}
+    return json.loads(path.read_text())
+
+
+def _normalize_sector(sector: Optional[str]) -> str:
     return (sector or "").strip().lower()
 
 
-def _normalize_ticker(ticker: str | None) -> str:
-    return str(ticker or "").strip().upper()
+def _replacement_for_sector(sector: str) -> str:
+    if not sector:
+        return REPLACEMENT_MAPPING["broad"]
+    return REPLACEMENT_MAPPING.get(sector, REPLACEMENT_MAPPING["broad"])
 
 
-def _load_exclusions(exclusions_path: str | Path | None) -> tuple[set[str], set[str]]:
-    if not exclusions_path:
-        return set(), set()
-    data = json.loads(Path(exclusions_path).read_text())
-    sectors = {_normalize_sector(sector) for sector in data.get("sectors", [])}
-    tickers = {_normalize_ticker(ticker) for ticker in data.get("tickers", [])}
-    return sectors, tickers
+def _build_registry(registry: Optional[dict]) -> WashSaleRegistry:
+    if not registry:
+        return WashSaleRegistry(recent_sales={}, substantially_identical={})
+    return WashSaleRegistry(
+        recent_sales=registry.get("recent_sales", {}),
+        substantially_identical=registry.get("substantially_identical", {}),
+    )
 
 
-def _is_tlh_eligible(lot: dict[str, Any], drawdown_mode: bool) -> bool:
-    loss_threshold = Decimal("-0.05") if drawdown_mode else Decimal("-0.06")
-    unrealized = lot.get("unrealized_pl_pct")
-    if unrealized is None:
-        cost_basis = Decimal(str(lot.get("cost_basis_per_share", 0)))
-        current = Decimal(str(lot.get("current_price", 0)))
-        if cost_basis == 0:
-            return False
-        unrealized = (current - cost_basis) / cost_basis
-    unrealized = Decimal(str(unrealized))
-    if unrealized > loss_threshold:
+def _eligible_for_loss(lot: dict, drawdown_mode: bool) -> bool:
+    loss_pct = -_as_decimal(lot.get("unrealized_pl_pct", 0))
+    if loss_pct <= 0:
         return False
-    qty = Decimal(str(lot.get("qty", 0)))
-    cost_basis = Decimal(str(lot.get("cost_basis_per_share", 0)))
-    current = Decimal(str(lot.get("current_price", 0)))
-    loss_value = (current - cost_basis) * qty
-    return loss_value <= Decimal("-25")
+    if drawdown_mode:
+        return loss_pct >= Decimal("0.05")
+    dollar_loss = _as_decimal(lot.get("cost_basis_per_share")) - _as_decimal(
+        lot.get("current_price")
+    )
+    dollar_loss *= _as_decimal(lot.get("qty"))
+    return loss_pct >= Decimal("0.08") and dollar_loss >= Decimal("25")
 
 
-def _replacement_for_lot(lot: dict[str, Any]) -> str:
-    sector = _normalize_sector(lot.get("sector"))
-    return SECTOR_REPLACEMENTS.get(sector, DEFAULT_REPLACEMENT)
-
-
-def _buy_blocked(
-    replacement: str,
-    excluded_tickers: set[str],
-    wash_sale_registry: dict[str, Any] | None,
-) -> bool:
-    replacement = _normalize_ticker(replacement)
-    if replacement in excluded_tickers:
-        return True
-    if not wash_sale_registry:
-        return False
-    recent_sales = {
-        _normalize_ticker(ticker) for ticker in wash_sale_registry.get("recent_sales", {})
-    }
-    if replacement in recent_sales:
-        return True
-    substantially_identical = wash_sale_registry.get("substantially_identical", {})
-    for alt in substantially_identical.get(replacement, []):
-        if _normalize_ticker(alt) in recent_sales:
-            return True
-    return False
-
-
-def _format_qty(value: Decimal) -> str:
-    quantized = value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-    return f"{quantized:.4f}"
-
-
-def _format_price(value: Decimal) -> str:
-    quantized = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return f"{quantized:.2f}"
+def _loss_candidates(lots: Iterable[dict], drawdown_mode: bool) -> list[LossCandidate]:
+    candidates: list[LossCandidate] = []
+    for lot in lots:
+        if not _eligible_for_loss(lot, drawdown_mode):
+            continue
+        sector = _normalize_sector(lot.get("sector"))
+        replacement = _replacement_for_sector(sector)
+        qty = _as_decimal(lot.get("qty"))
+        current_price = _as_decimal(lot.get("current_price"))
+        loss_pct = -_as_decimal(lot.get("unrealized_pl_pct"))
+        dollar_loss = (_as_decimal(lot.get("cost_basis_per_share")) - current_price) * qty
+        candidates.append(
+            LossCandidate(
+                symbol=str(lot.get("symbol")).upper(),
+                qty=qty,
+                current_price=current_price,
+                loss_pct=loss_pct,
+                dollar_loss=dollar_loss,
+                sector=sector,
+                replacement=replacement,
+            )
+        )
+    return candidates
 
 
 def _clip_turnover(
-    candidates: Iterable[tuple[dict[str, Any], dict[str, Any] | None]],
-    portfolio_value: Decimal,
-    drawdown_mode: bool,
-) -> list[dict[str, Any]]:
-    cap = Decimal("0.6") if drawdown_mode else Decimal("0.2")
-    cap_value = portfolio_value * cap
-    used = Decimal("0")
-    trades: list[dict[str, Any]] = []
-    for sell_trade, buy_trade in candidates:
-        sell_value = Decimal(str(sell_trade["price"])) * Decimal(str(sell_trade["qty"]))
-        if used + sell_value > cap_value:
-            break
-        used += sell_value
-        trades.append(sell_trade)
-        if buy_trade is not None:
-            trades.append(buy_trade)
-    return trades
+    candidates: list[LossCandidate], total_portfolio_value: Decimal
+) -> list[LossCandidate]:
+    cap = total_portfolio_value * Decimal("0.20")
+    if cap <= 0:
+        return []
+    ordered = sorted(candidates, key=lambda item: item.dollar_loss, reverse=True)
+    selected: list[LossCandidate] = []
+    running_value = Decimal("0")
+    for candidate in ordered:
+        if running_value + candidate.sale_value > cap:
+            continue
+        selected.append(candidate)
+        running_value += candidate.sale_value
+    return selected
+
+
+def _calculate_portfolio_value(lots: Iterable[dict]) -> Decimal:
+    total = Decimal("0")
+    for lot in lots:
+        total += _as_decimal(lot.get("qty")) * _as_decimal(lot.get("current_price"))
+    return total
 
 
 def propose_trades(
-    payload: dict[str, Any],
-    *,
+    payload: dict,
     drawdown_mode: bool = False,
-    exclusions_path: str | Path | None = None,
-    wash_sale_registry: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    dry_run: bool = False,
+    wash_sale_registry: Optional[dict] = None,
+    exclusions_path: Path = DEFAULT_EXCLUSIONS_PATH,
+) -> dict:
+    logger = logging.getLogger(__name__)
+    if COMPLIANCE_DUMMY:
+        logger.warning("Compliance check is using dummy implementation.")
+    else:
+        logger.info("Compliance check is using real implementation.")
+
     lots = payload.get("lots", [])
     replacement_prices = payload.get("replacement_prices", {})
     portfolio_value = payload.get("portfolio_value")
-    if portfolio_value is None:
-        portfolio_value = sum(
-            Decimal(str(lot.get("qty", 0))) * Decimal(str(lot.get("current_price", 0)))
-            for lot in lots
-        )
-    portfolio_value = Decimal(str(portfolio_value))
+    total_portfolio_value = (
+        _as_decimal(portfolio_value)
+        if portfolio_value is not None
+        else _calculate_portfolio_value(lots)
+    )
 
-    _, excluded_tickers = _load_exclusions(exclusions_path)
-    candidates: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
-    for lot in lots:
-        ticker = _normalize_ticker(lot.get("symbol"))
-        if not _is_tlh_eligible(lot, drawdown_mode):
-            continue
-        qty = Decimal(str(lot.get("qty", 0)))
-        price = Decimal(str(lot.get("current_price", 0)))
-        sell_trade = {
-            "action": "sell",
-            "symbol": ticker,
-            "qty": _format_qty(qty),
-            "price": _format_price(price),
-        }
-        replacement = _replacement_for_lot(lot)
-        buy_trade = None
-        replacement_price_raw = replacement_prices.get(replacement)
-        if replacement_price_raw is not None and not _buy_blocked(
-            replacement, excluded_tickers, wash_sale_registry
-        ):
-            replacement_price = Decimal(str(replacement_price_raw))
-            sell_value = qty * price
-            buy_qty = sell_value / replacement_price if replacement_price else Decimal("0")
-            buy_trade = {
-                "action": "buy",
-                "symbol": _normalize_ticker(replacement),
-                "qty": _format_qty(buy_qty),
-                "price": _format_price(replacement_price),
+    exclusions = _load_exclusions(exclusions_path)
+    excluded_sectors = {
+        sector.strip().lower() for sector in exclusions.get("sectors", [])
+    }
+    excluded_tickers = {
+        ticker.strip().upper() for ticker in exclusions.get("tickers", [])
+    }
+    registry = _build_registry(wash_sale_registry)
+
+    candidates = _loss_candidates(lots, drawdown_mode)
+    potential_loss = sum((candidate.dollar_loss for candidate in candidates), Decimal("0"))
+    selected = _clip_turnover(candidates, total_portfolio_value)
+
+    trades = []
+    harvested_loss = Decimal("0")
+    total_sell_value = Decimal("0")
+
+    for candidate in selected:
+        harvested_loss += candidate.dollar_loss
+        total_sell_value += candidate.sale_value
+        trades.append(
+            {
+                "action": "sell",
+                "symbol": candidate.symbol,
+                "qty": _format_shares(candidate.qty),
+                "price": str(candidate.current_price),
+                "replacement": candidate.replacement,
             }
-        candidates.append((sell_trade, buy_trade))
+        )
 
-    trades = _clip_turnover(candidates, portfolio_value, drawdown_mode)
-    return {"trades": trades}
+        replacement = candidate.replacement
+        replacement_sector_blocked = candidate.sector in excluded_sectors
+        replacement_ticker_blocked = replacement in excluded_tickers
+        if replacement_sector_blocked or replacement_ticker_blocked:
+            continue
+        if registry.is_blocked(replacement):
+            continue
+        if not check_safety(replacement, datetime.now(tz=timezone.utc).date()):
+            continue
+
+        replacement_price = _as_decimal(replacement_prices.get(replacement, "1"))
+        buy_qty = candidate.sale_value / replacement_price
+        trades.append(
+            {
+                "action": "buy",
+                "symbol": replacement,
+                "qty": _format_shares(buy_qty),
+                "price": str(replacement_price),
+                "replaces": candidate.symbol,
+            }
+        )
+
+    summary = {
+        "total_portfolio_value": str(total_portfolio_value),
+        "potential_loss": str(potential_loss),
+        "harvested_loss": str(harvested_loss),
+        "total_sell_value": str(total_sell_value),
+        "turnover_ratio": str(
+            (total_sell_value / total_portfolio_value) if total_portfolio_value else 0
+        ),
+    }
+
+    if dry_run:
+        print(
+            "Losses Harvested vs Potential Losses: "
+            f"{harvested_loss} / {potential_loss}"
+        )
+        return {"summary": summary, "trades": []}
+
+    return {"summary": summary, "trades": trades}
+
+
+def mock_wash_sale_registry(
+    recent_sales: Optional[dict[str, str]] = None,
+    substantially_identical: Optional[dict[str, list[str]]] = None,
+    as_of: Optional[datetime] = None,
+) -> dict:
+    cutoff = (as_of or datetime.utcnow()) - timedelta(days=90)
+    cleaned_sales = {}
+    for ticker, date_str in (recent_sales or {}).items():
+        try:
+            sold_date = datetime.fromisoformat(date_str)
+        except ValueError:
+            continue
+        if sold_date >= cutoff:
+            cleaned_sales[ticker.upper()] = sold_date.date().isoformat()
+    return {
+        "recent_sales": cleaned_sales,
+        "substantially_identical": {
+            key.upper(): [item.upper() for item in values]
+            for key, values in (substantially_identical or {}).items()
+        },
+    }
