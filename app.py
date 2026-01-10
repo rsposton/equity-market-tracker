@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -161,6 +162,18 @@ def _tracking_error_proxy(summary: dict) -> float:
     return min(max(turnover, 0.0), 1.0)
 
 
+def _app_version() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
 st.set_page_config(
     page_title="Direct Index TLH Manager",
     layout="wide",
@@ -277,3 +290,5 @@ if records:
     st.dataframe(wash_df, use_container_width=True)
 else:
     st.info("No wash-sale locks are currently active.")
+
+st.caption(f"App version: {_app_version()}")
