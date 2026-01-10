@@ -1,7 +1,11 @@
 import csv
 import io
+import json
 import re
+from collections import defaultdict
 from datetime import datetime, date
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 import pandas as pd
@@ -23,6 +27,44 @@ HEADER_ALIASES = {
     "Date Acquired": "Date Acquired",
     "Acquired": "Acquired",
 }
+
+ACTION_CATEGORIES = {
+    "buy": "acquisition",
+    "reinvest shares": "acquisition",
+    "qual div reinvest": "acquisition",
+    "sell": "disposal",
+    "qualified dividend": "cash_flow",
+    "cash dividend": "cash_flow",
+    "non-qualified div": "cash_flow",
+    "credit interest": "cash_flow",
+    "promotional award": "cash_flow",
+    "cash in lieu": "cash_flow",
+    "reverse split": "corporate_action",
+    "cash merger": "corporate_action",
+    "cash merger adj": "corporate_action",
+    "journal": "admin",
+    "security transfer": "admin",
+}
+
+ACTION_CANONICAL = {
+    "qual div reinvest": "qual div reinvest",
+    "qualified dividend": "qualified dividend",
+    "cash dividend": "cash dividend",
+    "non-qualified div": "non-qualified div",
+    "reinvest shares": "reinvest shares",
+    "credit interest": "credit interest",
+    "promotional award": "promotional award",
+    "cash in lieu": "cash in lieu",
+    "reverse split": "reverse split",
+    "cash merger": "cash merger",
+    "cash merger adj": "cash merger adj",
+    "journal": "journal",
+    "security transfer": "security transfer",
+    "buy": "buy",
+    "sell": "sell",
+}
+
+WASH_SALE_INDEX: dict[str, list[dict]] = {}
 
 
 class Lot(BaseModel):
@@ -85,11 +127,49 @@ def _parse_date(value: Optional[str]) -> date:
     raise ValueError(f"unsupported date format: {value}")
 
 
+def _parse_effective_date(value: Optional[str]) -> date:
+    if not value:
+        raise ValueError("transaction date is required")
+    cleaned = str(value).strip()
+    match = re.search(
+        r"as of\s*(\d{2}/\d{2}/\d{4}|\d{4}[-/]\d{2}[-/]\d{2})",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return _parse_date(match.group(1).replace("-", "/"))
+    date_match = re.search(r"(\d{2}/\d{2}/\d{4}|\d{4}[-/]\d{2}[-/]\d{2})", cleaned)
+    if date_match:
+        return _parse_date(date_match.group(1).replace("-", "/"))
+    return _parse_date(cleaned)
+
+
 def _strip_excel_format(value: str) -> str:
     cleaned = value.strip()
     if cleaned.startswith("="):
         cleaned = cleaned.lstrip("=")
     return cleaned.strip('"')
+
+
+def _parse_decimal(value: Optional[str]) -> Optional[Decimal]:
+    if value is None or str(value).strip() == "":
+        return None
+    cleaned = _strip_excel_format(str(value))
+    if cleaned.upper() in {"N/A", "--"}:
+        return None
+    cleaned = cleaned.replace("$", "").replace(",", "").strip()
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        cleaned = f"-{cleaned[1:-1]}"
+    return Decimal(cleaned)
+
+
+def _normalize_action(value: Optional[str]) -> str:
+    cleaned = str(value or "").strip().lower()
+    return ACTION_CANONICAL.get(cleaned, cleaned)
+
+
+def _action_category(action: str) -> str:
+    return ACTION_CATEGORIES.get(action, "unknown")
 
 
 def _parse_currency(value: Optional[str]) -> float:
@@ -195,22 +275,194 @@ def parse_schwab_positions(path: str) -> List[dict]:
     return payload
 
 
+def _load_brokerage_transactions(path: str) -> list[dict]:
+    payload = json.loads(Path(path).read_text())
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        records = payload.get("BrokerageTransactions") or payload.get("brokerageTransactions")
+        if records is None:
+            raise ValueError("JSON payload missing BrokerageTransactions array")
+        return records
+    raise ValueError("unsupported JSON payload shape")
+
+
+def _adjustment_sort_key(adjustment: dict) -> tuple[str, int]:
+    return (adjustment["effective_date"], adjustment["source_index"])
+
+
+def _build_adjustment(
+    *,
+    event_id: Optional[str],
+    effective_date: date,
+    action: str,
+    symbol: Optional[str],
+    quantity: Optional[Decimal],
+    price: Optional[Decimal],
+    amount: Optional[Decimal],
+    source_index: int,
+) -> dict:
+    category = _action_category(action)
+    normalized_symbol = symbol.strip().upper() if symbol else None
+    adjustment: dict = {
+        "event_id": event_id,
+        "effective_date": effective_date.isoformat(),
+        "action": action,
+        "category": category,
+        "symbol": normalized_symbol,
+        "quantity": quantity,
+        "price": price,
+        "amount": amount,
+        "cash_delta": None,
+        "lot_delta": None,
+        "cost_basis_multiplier": None,
+        "wash_sale_candidate": action == "sell",
+        "source_index": source_index,
+    }
+
+    if category == "acquisition":
+        normalized_qty = abs(quantity) if quantity is not None else None
+        inferred_amount = amount
+        if inferred_amount is None and price is not None and normalized_qty is not None:
+            inferred_amount = price * normalized_qty
+        adjustment["quantity"] = normalized_qty
+        adjustment["amount"] = inferred_amount
+        adjustment["lot_delta"] = normalized_qty
+        adjustment["cash_delta"] = -abs(inferred_amount) if inferred_amount is not None else None
+    elif category == "disposal":
+        normalized_qty = abs(quantity) if quantity is not None else None
+        inferred_amount = amount
+        if inferred_amount is None and price is not None and normalized_qty is not None:
+            inferred_amount = price * normalized_qty
+        adjustment["quantity"] = normalized_qty
+        adjustment["amount"] = inferred_amount
+        adjustment["lot_delta"] = -normalized_qty if normalized_qty is not None else None
+        adjustment["cash_delta"] = abs(inferred_amount) if inferred_amount is not None else None
+    elif category == "cash_flow":
+        adjustment["cash_delta"] = amount
+    elif category == "corporate_action":
+        if action in {"cash merger", "cash merger adj"}:
+            normalized_qty = abs(quantity) if quantity is not None else None
+            adjustment["quantity"] = normalized_qty
+            adjustment["lot_delta"] = -normalized_qty if normalized_qty is not None else None
+            adjustment["cash_delta"] = amount
+        elif action == "reverse split":
+            adjustment["lot_delta"] = quantity
+    elif category == "admin":
+        adjustment["cash_delta"] = amount
+        adjustment["lot_delta"] = quantity
+
+    return adjustment
+
+
+def _collapse_reverse_splits(adjustments: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str | None, str], list[dict]] = defaultdict(list)
+    remaining: list[dict] = []
+    for adjustment in adjustments:
+        if adjustment["action"] == "reverse split":
+            grouped[(adjustment["symbol"], adjustment["effective_date"])].append(adjustment)
+        else:
+            remaining.append(adjustment)
+
+    for (symbol, effective_date), items in grouped.items():
+        negative_qty = sum(
+            (item["quantity"] or Decimal("0"))
+            for item in items
+            if (item["quantity"] or Decimal("0")) < 0
+        )
+        positive_qty = sum(
+            (item["quantity"] or Decimal("0"))
+            for item in items
+            if (item["quantity"] or Decimal("0")) > 0
+        )
+        if negative_qty and positive_qty:
+            raw_ratio = (abs(negative_qty) / positive_qty).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            combined = items[0].copy()
+            combined["quantity_before"] = abs(negative_qty)
+            combined["quantity_after"] = positive_qty
+            combined["cost_basis_multiplier"] = raw_ratio
+            combined["lot_delta"] = None
+            remaining.append(combined)
+        else:
+            remaining.extend(items)
+
+    return remaining
+
+
+def _build_wash_sale_index(adjustments: list[dict]) -> dict[str, list[dict]]:
+    registry: dict[str, list[dict]] = defaultdict(list)
+    for adjustment in adjustments:
+        if adjustment.get("action") == "sell":
+            symbol = adjustment.get("symbol")
+            if not symbol:
+                continue
+            registry[symbol].append(
+                {
+                    "effective_date": adjustment["effective_date"],
+                    "quantity": adjustment.get("quantity"),
+                    "amount": adjustment.get("amount"),
+                }
+            )
+    return dict(registry)
+
+
 def parse_schwab_transactions(path: str) -> List[dict]:
+    global WASH_SALE_INDEX
+    if Path(path).suffix.lower() == ".json":
+        transactions = _load_brokerage_transactions(path)
+        adjustments: list[dict] = []
+        seen_ids: set[str] = set()
+        for index, row in enumerate(transactions):
+            event_id = str(row.get("ItemIssueId") or row.get("itemIssueId") or "").strip() or None
+            if event_id and event_id in seen_ids:
+                continue
+            if event_id:
+                seen_ids.add(event_id)
+
+            action = _normalize_action(row.get("Action") or row.get("action"))
+            effective_date = _parse_effective_date(row.get("Date") or row.get("date"))
+            adjustment = _build_adjustment(
+                event_id=event_id,
+                effective_date=effective_date,
+                action=action,
+                symbol=str(row.get("Symbol") or row.get("symbol") or "").strip(),
+                quantity=_parse_decimal(row.get("Quantity") or row.get("quantity")),
+                price=_parse_decimal(row.get("Price") or row.get("price")),
+                amount=_parse_decimal(row.get("Amount") or row.get("amount")),
+                source_index=index,
+            )
+            adjustments.append(adjustment)
+
+        adjustments = _collapse_reverse_splits(adjustments)
+        adjustments.sort(key=_adjustment_sort_key)
+        for adjustment in adjustments:
+            adjustment.pop("source_index", None)
+        WASH_SALE_INDEX.clear()
+        WASH_SALE_INDEX.update(_build_wash_sale_index(adjustments))
+        return adjustments
+
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
     if df.empty:
         raise ValueError("CSV contains no transaction rows")
 
     transactions = []
-    for _, row in df.iterrows():
-        transactions.append(
-            {
-                "date": _parse_date(row.get("Date")).isoformat(),
-                "action": str(row.get("Action")).strip().lower(),
-                "symbol": str(row.get("Symbol")).strip().upper(),
-                "quantity": float(row.get("Quantity")),
-                "price": _parse_currency(row.get("Price")),
-                "total_amount": _parse_currency(row.get("Total Amount")),
-            }
+    for index, row in df.iterrows():
+        action = _normalize_action(row.get("Action"))
+        adjustment = _build_adjustment(
+            event_id=None,
+            effective_date=_parse_date(row.get("Date")),
+            action=action,
+            symbol=str(row.get("Symbol")).strip(),
+            quantity=_parse_decimal(row.get("Quantity")),
+            price=_parse_decimal(row.get("Price")),
+            amount=_parse_decimal(row.get("Total Amount")),
+            source_index=int(index),
         )
+        adjustment.pop("source_index", None)
+        transactions.append(adjustment)
 
+    WASH_SALE_INDEX.clear()
+    WASH_SALE_INDEX.update(_build_wash_sale_index(transactions))
     return transactions
