@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -9,7 +10,7 @@ from typing import Iterable, Optional
 
 
 DEFAULT_DB_PATH = Path("wash_sale.db")
-LOCKOUT_DAYS = 90
+WASH_SALE_WINDOW = 31
 COMPLIANCE_DUMMY = False
 
 
@@ -48,7 +49,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 def record_harvest(ticker: str, qty: int, sell_date: date | datetime | str, db_path: Path = DEFAULT_DB_PATH) -> bool:
     normalized_sell_date = _ensure_date(sell_date)
-    unlock_date = normalized_sell_date + timedelta(days=LOCKOUT_DAYS)
+    unlock_date = normalized_sell_date + timedelta(days=WASH_SALE_WINDOW)
     with _connect(db_path) as connection:
         cursor = connection.execute(
             """
@@ -74,7 +75,14 @@ def check_safety(ticker: str, current_date: date | datetime | str, db_path: Path
     if row is None or row[0] is None:
         return True
     latest_unlock_date = _ensure_date(row[0])
-    return normalized_current_date >= latest_unlock_date
+    if normalized_current_date < latest_unlock_date:
+        logging.getLogger(__name__).info(
+            "Wash sale lockout active for %s until %s.",
+            ticker.upper(),
+            latest_unlock_date.isoformat(),
+        )
+        return False
+    return True
 
 
 def get_locked_tickers(current_date: Optional[date | datetime | str] = None, db_path: Path = DEFAULT_DB_PATH) -> list[str]:
