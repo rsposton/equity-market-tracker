@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+import os
 import tempfile
 from pathlib import Path
 
 import pandas as pd
+
 import streamlit as st
 
 import database
@@ -57,9 +59,12 @@ col_a, col_b = st.columns(2)
 
 with col_a:
     if st.button("Sync Prices"):
-        api_key = st.secrets.get("FMP_API_KEY")
+        api_key = st.secrets.get("FMP_API_KEY") or os.getenv("FMP_API_KEY")
         if not api_key:
-            st.warning("Missing FMP API key. Add it to .streamlit/secrets.toml")
+            st.warning(
+                "Missing FMP API key. Add it to .streamlit/secrets.toml or set FMP_API_KEY "
+                "in the environment."
+            )
         elif not positions:
             st.info("No positions to refresh.")
         else:

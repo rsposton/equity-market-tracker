@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -58,9 +59,12 @@ st.subheader("Genesis Exercise")
 st.write(f"Current cash available: ${selected_env.current_cash:,.2f}")
 
 if st.button("Run Genesis Exercise", type="primary"):
-    api_key = st.secrets.get("FMP_API_KEY")
+    api_key = st.secrets.get("FMP_API_KEY") or os.getenv("FMP_API_KEY")
     if not api_key:
-        st.warning("Missing FMP API key. Add it to .streamlit/secrets.toml")
+        st.warning(
+            "Missing FMP API key. Add it to .streamlit/secrets.toml or set FMP_API_KEY "
+            "in the environment."
+        )
     elif selected_env.current_cash <= 0:
         st.warning("No cash available. Create a new sandbox with a budget.")
     else:
